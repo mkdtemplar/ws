@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 
@@ -8,6 +9,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 )
+
+var wsChan = make(chan WsPayload)
+var clients = make(map[WsConnection]string)
 
 var (
 	views = jet.NewSet(
@@ -23,10 +27,21 @@ var (
 	}
 )
 
+type WsConnection struct {
+	*websocket.Conn
+}
+
 type WsJsonResponse struct {
 	Action      string `json:"action"`
 	Message     string `json:"message"`
 	MessageType string `json:"message_type"`
+}
+
+type WsPayload struct {
+	Action   string       `json:"action"`
+	Username string       `json:"username"`
+	Message  string       `json:"message"`
+	Conn     WsConnection `json:"-"`
 }
 
 func WsEndpoint(c *gin.Context) {
@@ -40,9 +55,56 @@ func WsEndpoint(c *gin.Context) {
 	var response WsJsonResponse
 	response.Message = `<em><small>Connected to server</small></em>`
 
+	conn := WsConnection{Conn: ws}
+	clients[conn] = ""
+
 	err = ws.WriteJSON(response)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
+	}
+
+	go ListenForWs(&conn)
+}
+
+func ListenForWs(conn *WsConnection) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Println("Recovered from panic:", r)
+		}
+	}()
+
+	var payload WsPayload
+
+	for {
+		err := conn.ReadJSON(&payload)
+		if err != nil {
+			log.Println(err)
+		} else {
+			payload.Conn = *conn
+			wsChan <- payload
+		}
+	}
+}
+
+func ListenForWsChan() {
+	var response WsJsonResponse
+
+	for {
+		e := <-wsChan
+		response.Action = "Got here"
+		response.Message = fmt.Sprintf("Some message and action %s", e.Action)
+		broadcastToAll(response)
+	}
+}
+
+func broadcastToAll(response WsJsonResponse) {
+	for client := range clients {
+		err := client.WriteJSON(response)
+		if err != nil {
+			log.Println(err)
+			_ = client.Close()
+			delete(clients, client)
+		}
 	}
 }
 
